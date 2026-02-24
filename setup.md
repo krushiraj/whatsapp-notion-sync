@@ -1,4 +1,4 @@
-# WhatsApp → Notion Sync — Setup Guide
+# Setup Guide
 
 ## Prerequisites
 
@@ -9,96 +9,96 @@
 ## 1. Install Dependencies
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ## 2. Create a Notion Integration
 
-1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations)
-2. Click **New integration**
+1. Go to [www.notion.so/profile/integrations/internal](https://www.notion.so/profile/integrations/internal)
+2. Click **Create a new integration**
 3. Name it something like "WhatsApp Sync"
-4. Under **Capabilities**, ensure **Read content**, **Insert content**, and **Update content** are checked
-5. Click **Submit** and copy the **Internal Integration Secret** (starts with `secret_`)
+4. Add correct workspace.
+5. Click **Submit**
+6. Open it, make sure **Content Capabilities** are enabled, copy the **Internal Integration Secret** (starts with `secret_`)
 
 ## 3. Set Up the Notion Parent Page
 
 1. In Notion, create a new page called **WhatsApp Sync** (or whatever you like)
-2. Click the **···** menu in the top-right → **Add connections** → select your "WhatsApp Sync" integration
+2. Click the **...** menu in the top-right -> **Connections** -> select your "WhatsApp Sync" integration
 3. Copy the page ID from the URL:
    - URL looks like: `https://www.notion.so/WhatsApp-Sync-abc123def456...`
-   - The page ID is the 32-character hex string at the end (add dashes to make it a UUID, or just paste the raw hex — both work)
+   - The page ID is the 32-character hex string at the end (add dashes to make it a UUID, or just paste the raw hex -- both work)
 
-## 4. Configure Environment & Groups
+## 4. Configure Environment
 
-Copy the example env file and fill in your secrets:
+Copy the example files and fill in your values:
 
 ```bash
 cp .env.example .env
+cp config.yaml.example config.yaml
 ```
 
-Edit `.env`:
+Edit `.env` with your Notion secrets:
 
 ```
 NOTION_API_KEY=secret_YOUR_KEY_HERE
 NOTION_PARENT_PAGE_ID=YOUR_PAGE_ID_HERE
 ```
 
-Then edit `config.yaml` to list the groups you want to track:
+## 5. Discover WhatsApp Group JIDs
+
+Run the discovery script to link WhatsApp and see your groups:
+
+```bash
+python scripts/list_groups.py
+```
+
+First time, a QR code appears in the terminal -- scan it with WhatsApp (Settings -> Linked Devices -> Link a Device). Once connected, the script prints all your groups:
+
+```
+Group Name                               JID
+---------------------------------------------------------------------------
+Family Chat                              1234567890@g.us
+Inbox                                    9876543210@g.us
+```
+
+To list only groups inside a specific community:
+
+```bash
+python scripts/list_groups.py "Second brain"
+```
+
+## 6. Configure Groups
+
+Edit `config.yaml` and paste the JIDs from step 5:
 
 ```yaml
 groups:
   - name: "Inbox"
-    whatsapp_jid: null       # filled after first run
-    notion_page_id: null     # auto-created on first run
+    whatsapp_jid: "9876543210@g.us"
+    notion_page_id: null
     emoji: "📥"
 ```
 
-Add more groups as needed. The `whatsapp_jid` will be discovered in the next step.
+Add as many groups as you want. Leave `notion_page_id` as `null` -- the service creates the Notion pages automatically on first run.
 
-## 5. First Run — Link WhatsApp & Discover Groups
-
-```bash
-python main.py
-```
-
-On first run:
-
-1. A **QR code** appears in the terminal — scan it with WhatsApp (Linked Devices → Link a Device)
-2. Once connected, the script prints all your WhatsApp groups with their JIDs:
-   ```
-   Groups found:
-     Family Chat  →  1234567890@g.us
-     Inbox        →  9876543210@g.us
-     ...
-   ```
-3. Copy the JID for each group you want to track and paste it into `config.yaml` under `whatsapp_jid`
-4. Stop the script (Ctrl+C)
-
-## 6. Second Run — Start Syncing
+## 7. Run
 
 ```bash
 python main.py
 ```
 
-The bot will:
+The service will:
 
-- Auto-create Notion child pages (one per group) under your parent page if they don't exist yet
+- Auto-create Notion child pages (one per group) under your parent page
 - Write the `notion_page_id` back to `config.yaml` so it's persistent
 - Start listening for messages and syncing them to Notion, newest at the top
 
-## How Messages Appear in Notion
-
-Each synced message becomes a small cluster of blocks:
-
-- **Text message**: paragraph with the message text
-- **Links**: bookmark blocks (Notion auto-generates previews)
-- **Annotation line**: sender name + timestamp in gray italic
-- **Divider**: thin line separating messages
-
-Messages are always inserted at the **top** of the page, so the newest content is first.
-
 ## Troubleshooting
 
-- **QR code not showing?** Make sure no other WhatsApp Web session is interfering. Delete `wa_session.db` to start fresh.
+- **QR code not showing?** Make sure no other session is interfering. Delete `wa_session.db` to start fresh.
 - **Notion API errors?** Verify your integration has access to the parent page (step 3.2 above).
-- **Messages not syncing?** Check that `whatsapp_jid` in config matches the group exactly as printed on first run.
+- **Messages not syncing?** Check that `whatsapp_jid` in config matches the JID exactly as printed by the discovery script.
+- **Process won't stop with Ctrl+C?** Run `kill $(pgrep -f "python main.py")` from another terminal.
