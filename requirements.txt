@@ -1,0 +1,4 @@
+neonize
+notion-client
+pyyaml
+python-dotenv

@@ -1,0 +1,6 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+wa_session.db
+config.yaml

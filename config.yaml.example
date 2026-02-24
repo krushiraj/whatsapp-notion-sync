@@ -1,0 +1,5 @@
+groups:
+  - name: "Inbox"                # custom page name for notion,auto-created on first run
+    whatsapp_jid: null           # run: python scripts/list_groups.py
+    notion_page_id: null         # auto-filled on first run
+    emoji: "📥"
