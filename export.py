@@ -1,0 +1,217 @@
+"""One-time export of WhatsApp history to Notion.
+
+Primary: Fetches historical messages via WhatsApp's history sync (HistorySyncEv).
+Fallback: If history sync yields no data within the timeout, reads already-synced
+messages from Notion pages and logs them (no-op if pages are empty).
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from datetime import datetime, timezone
+
+from neonize.client import NewClient
+from neonize.events import ConnectedEv, HistorySyncEv, OfflineSyncCompletedEv
+
+from notion_sync import NotionSync
+
+log = logging.getLogger(__name__)
+
+
+def parse_history_message(msg_info) -> dict | None:
+    """Parse a WebMessageInfo protobuf from history sync.
+
+    Similar to whatsapp.parse_message but works directly with protobufs
+    and skips media downloads (URLs are typically expired for old messages).
+    """
+    msg = msg_info.message
+    result = {
+        "text": "",
+        "image_bytes": None,
+        "image_mime": None,
+        "document_bytes": None,
+        "document_name": None,
+        "sticker_bytes": None,
+        "media_placeholder": None,
+    }
+
+    if msg.imageMessage.url or msg.imageMessage.directPath:
+        result["text"] = msg.imageMessage.caption or ""
+        result["media_placeholder"] = "[Image]"
+
+    elif msg.stickerMessage.url or msg.stickerMessage.directPath:
+        result["media_placeholder"] = "[Sticker]"
+
+    elif msg.videoMessage.url or msg.videoMessage.directPath:
+        result["text"] = msg.videoMessage.caption or ""
+        result["media_placeholder"] = "[Video]"
+
+    elif msg.audioMessage.url or msg.audioMessage.directPath:
+        result["media_placeholder"] = "[Voice note]"
+
+    elif msg.documentMessage.url or msg.documentMessage.directPath:
+        result["text"] = msg.documentMessage.caption or ""
+        doc_name = msg.documentMessage.fileName or "document"
+        result["media_placeholder"] = f"[Document: {doc_name}]"
+
+    elif msg.contactMessage.displayName:
+        result["text"] = f"Shared contact: {msg.contactMessage.displayName}"
+
+    elif msg.locationMessage.degreesLatitude:
+        lat = msg.locationMessage.degreesLatitude
+        lng = msg.locationMessage.degreesLongitude
+        result["text"] = f"https://maps.google.com/?q={lat},{lng}"
+
+    elif msg.extendedTextMessage.text:
+        result["text"] = msg.extendedTextMessage.text
+
+    elif msg.conversation:
+        result["text"] = msg.conversation
+
+    else:
+        return None
+
+    has_content = result["text"].strip() or result["media_placeholder"]
+    return result if has_content else None
+
+
+class HistoryExporter:
+    """Connects to WhatsApp, captures history sync data, pushes to Notion.
+
+    Falls back to reading from Notion pages if history sync yields nothing.
+    """
+
+    def __init__(
+        self,
+        client: NewClient,
+        tracked_groups: dict[str, str],
+        syncer: NotionSync,
+        timeout: int = 180,
+    ):
+        self.client = client
+        self.tracked_groups = tracked_groups  # {jid_string: notion_page_id}
+        self.syncer = syncer
+        self.timeout = timeout
+
+        self._connected = threading.Event()
+        self._sync_done = threading.Event()
+        self._history_received = False
+        self._message_count = 0
+        self._conversation_count = 0
+
+    def _on_connected(self, _client: NewClient, _evt: ConnectedEv):
+        log.info("WhatsApp connected, waiting for history sync...")
+        self._connected.set()
+
+    def _on_history_sync(self, _client: NewClient, evt: HistorySyncEv):
+        data = evt.Data
+        sync_type = data.syncType
+        progress = data.progress
+        log.info(
+            f"History sync event: type={sync_type}, "
+            f"conversations={len(data.conversations)}, progress={progress}%"
+        )
+
+        for conv in data.conversations:
+            chat_jid = conv.ID
+            if chat_jid not in self.tracked_groups:
+                continue
+
+            page_id = self.tracked_groups[chat_jid]
+            self._conversation_count += 1
+            messages = list(conv.messages)
+
+            # Sort oldest-first so Notion ends up with newest on top
+            messages.sort(key=lambda m: m.message.messageTimestamp)
+
+            for hist_msg in messages:
+                msg_info = hist_msg.message
+                parsed = parse_history_message(msg_info)
+                if not parsed:
+                    continue
+
+                msg_id = msg_info.key.ID
+                sender = msg_info.pushName or msg_info.participant or "Unknown"
+                raw_ts = msg_info.messageTimestamp
+                if raw_ts > 1e12:
+                    raw_ts = raw_ts / 1000
+                ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc).astimezone()
+
+                self.syncer.enqueue(msg_id, page_id, parsed, sender, ts)
+                self._message_count += 1
+                self._history_received = True
+
+            log.info(
+                f"  Chat {chat_jid}: {len(messages)} messages "
+                f"({self._message_count} total exported so far)"
+            )
+
+        if progress >= 98:
+            log.info("History sync progress ~100%, marking done")
+            self._sync_done.set()
+
+    def _on_offline_sync_completed(self, _client: NewClient, _evt: OfflineSyncCompletedEv):
+        log.info("Offline sync completed")
+        self._sync_done.set()
+
+    def _fallback_read_notion(self):
+        """Fallback: log what's already in Notion pages (no-op export)."""
+        log.info("Falling back to reading existing Notion pages...")
+        for jid, page_id in self.tracked_groups.items():
+            try:
+                children = self.syncer.notion.blocks.children.list(block_id=page_id)
+                block_count = len(children.get("results", []))
+                log.info(
+                    f"  Notion page for {jid}: {block_count} blocks already synced"
+                )
+            except Exception:
+                log.warning(f"  Could not read Notion page for {jid}")
+
+        log.info(
+            "No new messages to export. Previously synced messages are "
+            "already in Notion. Run the live sync (without --export) to "
+            "capture new messages."
+        )
+
+    def run(self):
+        """Run the one-time export."""
+        log.info(f"Starting history export (timeout={self.timeout}s)...")
+        log.info(f"Tracking {len(self.tracked_groups)} groups")
+
+        # Register handlers
+        self.client.event(ConnectedEv)(self._on_connected)
+        self.client.event(HistorySyncEv)(self._on_history_sync)
+        self.client.event(OfflineSyncCompletedEv)(self._on_offline_sync_completed)
+
+        # Start flush loop so messages get pushed to Notion
+        self.syncer.start_flush_loop()
+
+        # Connect (blocks until connected)
+        connect_thread = threading.Thread(target=self.client.connect, daemon=True)
+        connect_thread.start()
+
+        if not self._connected.wait(timeout=60):
+            log.error("Failed to connect to WhatsApp within 60 seconds")
+            return False
+
+        # Wait for history sync to complete or timeout
+        log.info(f"Waiting up to {self.timeout}s for history sync...")
+        self._sync_done.wait(timeout=self.timeout)
+
+        # Give flush loop time to push remaining messages
+        if self._message_count > 0:
+            log.info(f"Waiting for {self._message_count} messages to flush...")
+            time.sleep(5)
+            self.syncer.flush()
+
+        if self._history_received:
+            log.info(
+                f"Export complete: {self._message_count} messages from "
+                f"{self._conversation_count} conversations pushed to Notion"
+            )
+            return True
+        else:
+            log.warning("No history sync data received from WhatsApp")
+            self._fallback_read_notion()
+            return False

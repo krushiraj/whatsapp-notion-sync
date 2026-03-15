@@ -1,3 +1,4 @@
+import argparse
 import logging
 import signal
 
@@ -6,6 +7,7 @@ from neonize.client import NewClient
 from neonize.events import ConnectedEv, event
 
 from config import settings
+from export import HistoryExporter
 from notion_sync import NotionSync
 from whatsapp import setup_handlers
 
@@ -29,10 +31,25 @@ def save_groups(groups: list[dict]):
         yaml.dump({"groups": groups}, f, default_flow_style=False, allow_unicode=True)
 
 
-def main():
-    groups = load_groups()
+def parse_args():
+    parser = argparse.ArgumentParser(description="WhatsApp to Notion sync")
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="One-time export: fetch WhatsApp history and push to Notion",
+    )
+    parser.add_argument(
+        "--export-timeout",
+        type=int,
+        default=180,
+        help="Seconds to wait for WhatsApp history sync (default: 180)",
+    )
+    return parser.parse_args()
 
-    syncer = NotionSync(settings)
+
+def _load_tracked(syncer: NotionSync) -> dict[str, str]:
+    """Load groups from config and ensure Notion pages exist. Returns {jid: page_id}."""
+    groups = load_groups()
 
     for group in groups:
         if not group.get("notion_page_id"):
@@ -50,17 +67,34 @@ def main():
     if not tracked:
         log.error("No groups have both whatsapp_jid and notion_page_id set.")
         log.error("Run 'python scripts/list_groups.py' first to get JIDs.")
+
+    return tracked
+
+
+def main():
+    args = parse_args()
+    syncer = NotionSync(settings)
+    tracked = _load_tracked(syncer)
+
+    if not tracked:
         return
 
     client = NewClient(settings.wa_session_db)
-    setup_handlers(client, tracked, syncer.enqueue)
-    syncer.start_flush_loop()
 
-    signal.signal(signal.SIGINT, lambda *_: event.set())
-    log.info("Starting WhatsApp client...")
-    client.connect()
-    event.wait()
-    log.info("Shutting down.")
+    if args.export:
+        exporter = HistoryExporter(
+            client, tracked, syncer, timeout=args.export_timeout
+        )
+        exporter.run()
+    else:
+        setup_handlers(client, tracked, syncer.enqueue)
+        syncer.start_flush_loop()
+
+        signal.signal(signal.SIGINT, lambda *_: event.set())
+        log.info("Starting WhatsApp client...")
+        client.connect()
+        event.wait()
+        log.info("Shutting down.")
 
 
 if __name__ == "__main__":
