@@ -86,31 +86,38 @@ def parse_message(client: NewClient, message: MessageEv) -> dict | None:
 
 def setup_handlers(
     client: NewClient,
-    tracked_groups: dict[str, str],
+    tracked_chats: dict[str, str],
     on_message: Callable,
+    self_chat_page_id: str | None = None,
 ):
     """Register WhatsApp event handlers.
 
-    tracked_groups: {jid_string: notion_page_id}
+    tracked_chats: {jid_string: page_id} — groups and/or personal chat
     on_message(message_id, page_id, parsed_msg, sender, timestamp)
+    self_chat_page_id: if set, messages from own JID (@s.whatsapp.net) are synced here
     """
 
     @client.event(ConnectedEv)
-    def on_connected(_: NewClient, __: ConnectedEv):
+    def on_connected(c: NewClient, __: ConnectedEv):
         log.info("WhatsApp connected")
+        # Register own JID for self-chat tracking
+        if self_chat_page_id:
+            own_jid = Jid2String(c.get_me().JID)
+            tracked_chats[own_jid] = self_chat_page_id
+            log.info(f"Self-chat tracking enabled for {own_jid}")
 
     @client.event(MessageEv)
     def on_msg(c: NewClient, message: MessageEv):
         chat_jid = Jid2String(message.Info.MessageSource.Chat)
 
-        if chat_jid not in tracked_groups:
+        if chat_jid not in tracked_chats:
             return
 
         parsed = parse_message(c, message)
         if not parsed:
             return
 
-        page_id = tracked_groups[chat_jid]
+        page_id = tracked_chats[chat_jid]
         sender = message.Info.Pushname or "Unknown"
         msg_id = message.Info.ID
         raw_ts = message.Info.Timestamp

@@ -1,5 +1,12 @@
+# Track your personal chat ("Message Yourself") for quick notes
+self_chat:
+  enabled: true
+  page_name: "Notes to Self"     # Notion page name or Obsidian filename
+  emoji: "📝"
+
+# Track WhatsApp groups
 groups:
-  - name: "Inbox"                # custom page name for notion,auto-created on first run
+  - name: "Inbox"                # custom page name, auto-created on first run
     whatsapp_jid: null           # run: python scripts/list_groups.py
-    notion_page_id: null         # auto-filled on first run
+    notion_page_id: null         # auto-filled on first run (Notion only)
     emoji: "📥"
